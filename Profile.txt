@@ -1,0 +1,650 @@
+{\rtf1\ansi\ansicpg1252\cocoartf1347\cocoasubrtf570
+{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+\margl1440\margr1440\vieww24640\viewh15780\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural
+
+\f0\fs24 \cf0 Import-module ActiveDirectory\
+Import-Module PSDiagnostics\
+Import-Module TroubleshootingPack\
+\
+$global:domaincontroller = \'93domaincontroller.fully.quallified.domain\'94\
+$global:dhcpserver = \'93dhcpserver.umiacs.fully.quallified.domain\'94\
+\
+function help \{\
+Write-Host "\
+For info about a function use the command Get-Help followed by one of the functions below (ex: Get-Help addClient):  \
+addClient\
+deleteFile\
+removeClient\
+"\
+\}\
+\
+<# \
+.SYNOPSIS\
+Completes pre-installation steps for a windows client. \
+Just enter addClient or addClient -laptop for a laptop install. \
+\
+.DESCRIPTION\
+If the host does not exist yet, creates the following:\
+DHCP Allow Filter Entry\
+DNS Records\
+DHCP Records\
+Active Directory Object\
+\
+If the host does exist already, throws an error containing the check that failed.\
+\
+Parameter: HostName\
+The hostname of the host you are installing (can be either fully qualified or not).\
+\
+Parameter: MACAddress\
+The MAC Address of the host you are installing.\
+\
+Parameter: IP\
+The IP Address of the host you are installing (. delimited).\
+\
+Parameter: laptop\
+If the laptop flag is present, the IP flag will be disregarded, and the client will be added as inst1, inst2, inst3, or inst4.\
+\
+.EXAMPLE \
+PS C:\\> addClient -HostName testNameHost -MACAddress AA-AA-AA-AA-AA-AA -IP 192.168.11.120\
+Adds the host testNameHost with MAC Address AA-AA-AA-AA-AA-AA and IP Address 192.168.11.120.\
+\
+.EXAMPLE \
+PS C:\\> addClient -HostName testNameHost2 -MACAddress 00-50-56-A8-6D-D3 -IP 192.168.11.5\
+Adds the host testNameHost2 with MAC Address 00-50-56-A8-6D-D3 and IP Address 192.168.11.5\
+\
+.EXAMPLE \
+PS C:\\> addClient -HostName testNameHost3 -MACAddress 00-50-56-A8-6D-D3 -IP 192.168.11.5 -laptop\
+Adds the host testNameHost3, using one of the in reservations as the DNS record. \
+#>\
+function addClient \{\
+	[CmdletBinding(DefaultParameterSetName="notlaptop")]\
+	param(\
+	[Parameter(ParameterSetName="laptop")] [switch]$laptop,\
+	[Parameter(ParameterSetName="notlaptop", Mandatory=$true)]\
+	[Parameter(ParameterSetName="laptop", Mandatory=$true)] [string]$HostName,\
+	[Parameter(ParameterSetName="notlaptop", Mandatory=$true)]\
+	[Parameter(ParameterSetName="laptop", Mandatory=$true)]	 [ValidatePattern("([0-9a-fA-F]\{2\}[:-]\{0,1\})\{5\}[0-9a-fA-F]\{2\}")][string]$MACAddress,\
+	[Parameter(ParameterSetName="notlaptop", Mandatory=$true)] [string]$IP)\
+\
+	$temp = $HostName.split(".")\
+	$Name = $temp[0]\
+	if ($IP) \{\
+		$octects = $IP.split(".")\
+		$rzone = "\{0\}.\{1\}.\{2\}.in-addr.arpa" -f $octects[2],$octects[1],$octects[0]\
+		$Zone = "\{0\}.\{1\}.\{2\}.0" -f $octects[0],$octects[1],$octects[2]\
+	\}\
+	\
+\
+	$found = $True\
+	\
+	if (($MACAddress -notmatch "^([0-9a-fA-F]\{2\}[:-]\{0,1\})\{5\}[0-9a-fA-F]\{2\}$") -and ($MACAddress -notmatch "^([0-9a-fA-F]\{12\}$")) \{\
+		Write-Host "ERROR: Invalid MAC Address, MAC Address must be either : or - delimited"\
+		Write-Host "No changes have been made"\
+		return\
+	\}\
+	if ($MACAddress -match "^([0-9a-fA-F]\{2\}[:]\{0,1\})\{5\}[0-9a-fA-F]\{2\}$") \{\
+		$MACAddress = $MACAddress -replace ":","-"\
+	\} \
+	Write-Host "MAC Address Valid"\
+\
+	if ($laptop) \{\
+		Write-Host "Switching to Laptop Mode"\
+		addClientLaptop -HostName $HostName -MACAddress $MACAddress\
+		return\
+	\} else \{\
+		Write-Host "Not a Laptop Install"\
+	\}\
+\
+	if ($IP -notmatch "^(([0-9]|[1-9][0-9]|1[0-9]\{2\}|2[0-4][0-9]|25[0-5])\\.)\{3\}([0-9]|[1-9][0-9]|1[0-9]\{2\}|2[0-4][0-9]|25[0-5])$") \{\
+		Write-Host "ERROR: Invalid IP Address, IP Address must be . delimited"\
+		Write-Host "No changes have been made"\
+		return\
+	\}\
+	Write-Host "IP Address Valid"\
+\
+	# Check if Name is already taken (Does A record exist ?)\
+	$HostNameInUse = $True\
+	try \{\
+		$test = [System.Net.Dns]::GetHostEntry($HostName)\
+		$test\
+	\}\
+	catch \{\
+		$HostNameInUse = $False\
+	\}\
+	if ($HostNameInUse) \{\
+		Write-Host "ERROR: Host Name: $Name already taken"\
+		Write-Host "No changes have been made"\
+		return\
+	\}\
+	Write-Host "HostName Valid"\
+\
+	# Check if IP is already taken\
+	$IPInUse = $True\
+	$test\
+	try \{\
+		$test = [System.Net.Dns]::GetHostEntry($IP)\
+		if ($test.Hostname -match "^(([0-9]|[1-9][0-9]|1[0-9]\{2\}|2[0-4][0-9]|25[0-5])\\.)\{3\}([0-9]|[1-9][0-9]|1[0-9]\{2\}|2[0-4][0-9]|25[0-5])$") \{\
+			$IPInUse = $False\
+		\}\
+	\}\
+	catch \{\
+		$IPInUse = $False\
+	\}\
+	if ($IPInUse) \{\
+		Write-Host "ERROR: IP Address: $IP already taken by"$test.Hostname\
+		Write-Host "No changes have been made"\
+		return\
+	\}\
+\
+	Write-Host "IP Address Not Taken"\
+\
+	#check to see if computer exists as an object already\
+	try \{\
+		Get-ADComputer $Name\
+	\} catch \{\
+		$Found = $False\
+	\}\
+	if ($Found) \{\
+		Write-Host "ERROR: Computer Object: $Name already exists"\
+		Write-Host "No changes have been made"\
+		return\
+	\}\
+	Write-Host "Computer Object doesn't exist"\
+\
+  	$text = [string]$(Invoke-Expression "cmd /c netsh dhcp server \\\\$dhcpserver dump all") \
+  	if ($text.Contains("Dhcp Server \\\\$dhcpserver v4 Add Filter Allow " + $MACAddress)) \{ \
+		Write-Host "ERROR: MAC Address Already Exists in Allow Filter"\
+		Write-Host "No changes have been made"\
+		return\
+	\}\
+	Write-Host "MAC Address not in allow filter"\
+	\
+	#Check Zone Type\
+	$ZoneRecord = Get-WmiObject -ComputerName $domaincontroller -Namespace "root\\MicrosoftDNS" -Class "MicrosoftDNS_Zone" -Filter "Name='$rzone'"\
+	if ($ZoneRecord.ZoneType -eq 3)\{\
+		#If Zone is a stub then check if the reverse has been created.\
+		# Check if IP is taken (Does PTR record exist ?)\
+\
+		$result = Get-DnsEntry $IP\
+		if ($result -eq $IP)\{\
+			Write-Host "The reverse(PTR) record has not been created on the Unix side"\
+			Write-Host "No changes have been made"\
+			return\
+		\} elseif ($result -eq ("$Name.fully.qualified.domain")) \{\
+			Write-Host "Unix PTR Record found"\
+			Add-DHCPFilter -Server $dhcpserver -Allow -MACAddress $MACAddress -Description "$Name" \
+			New-DHCPReservation -Server $dhcpserver -Scope $Zone -IPAddress $IP -MACAddress $MACAddress -Description $Name -Name "$Name.fully.qualified.domain\'94\
+			Write-Host "Creating A record"\
+			New-DNSRecord -Server $domaincontroller -fzone \'93fully.qualified.domain\'94 -computer "$Name.fully.qualified.domain\'94 -address $IP -arec -rzone $rzone\
+			createComputerObject -Name $Name\
+			createAllowList\
+			Write-Host "Allow List on pxebootserver updated"\
+		\} else \{ \
+			Write-Host "PTR record found but does not match given host name, resolves to $result"\
+			Write-Host "No changes have been made"\
+			return\
+		\}\
+	\} else \{ #Zone is not stub create both A and PTR on windows\
+		Add-DHCPFilter -Server $dhcpserver -Allow -MACAddress $MACAddress -Description "$Name" \
+		New-DHCPReservation -Server $dhcpserver -Scope $Zone -IPAddress $IP -MACAddress $MACAddress -Description $Name -Name $Name\
+		Write-Host "Creating PTR and A record"\
+		New-DNSRecord -Server $domaincontroller -fzone \'93fully.qualified.domain\'94 -computer "$Name.fully.qualified.domain\'94 -address $IP -arec -ptr -rzone $rzone\
+		createComputerObject $Name\
+		createAllowList\
+		Write-Host "Allow List on pxebootserver updated"\
+	\}\
+\}\
+\
+<#\
+.SYNOPSIS\
+Removes a Windows Host as part of a reinstall or retire.\
+\
+.DESCRIPTION\
+Removes the Active Directory Object, Forward and Reverse DNS,\
+DHCP record and DHCP allow filter for the specified host.\
+\
+Parameter: HostName\
+Required, the name of the host you want to delete.\
+\
+.EXAMPLE\
+C:\\PS> removeClient testhost1\
+Removes testhost1 from AD, DNS, and DHCP.\
+#>\
+\
+function removeClient \{\
+	param([Parameter(Mandatory=$true)][string]$HostName,\
+	[switch]$v = $false)\
+	$temp = $HostName.split(".")\
+	$Name = $temp[0]\
+\
+	$HostNameNotValid = $False\
+	try \{\
+		$test = [System.Net.Dns]::GetHostEntry($Name)\
+	\}\
+	catch \{\
+		$HostNameNotValid = $True\
+	\}\
+	if ($HostNameNotValid) \{\
+		Write-Host "ERROR: HostName is not Valid"\
+		return\
+	\}\
+\
+	$title = "Remove Client"\
+	$message = "Are you sure you want to remove the client " + $HostName + "?"\
+\
+	$yes = New-Object System.Management.Automation.Host.ChoiceDescription "&Yes", `\
+    	"Deletes the Host."\
+\
+	$no = New-Object System.Management.Automation.Host.ChoiceDescription "&No", `\
+    	"Exits this command."\
+\
+	$options = [System.Management.Automation.Host.ChoiceDescription[]]($yes, $no)\
+\
+	$result = $host.ui.PromptForChoice($title, $message, $options, 1) \
+\
+	switch ($result)\
+    	\{\
+        	0 \{\
+			$results = @()\
+			$FullyQualified = $Name + \'93.fully.qualified.domain\'94\
+			$IP = [System.Net.Dns]::GetHostAddresses($Name)[0].ipaddresstostring\
+			$octects = $IP.split(".")\
+			$rzone = "\{0\}.\{1\}.\{2\}.in-addr.arpa" -f $octects[2],$octects[1],$octects[0]\
+			$Scope = "\{0\}.\{1\}.\{2\}.0" -f $octects[0],$octects[1],$octects[2]\
+			$scopeComputers = netsh dhcp server \\\\$dhcpserver scope $Scope show clients\
+			foreach ($i in $scopeComputers)\{\
+    				if ($i -match $IP)\{\
+      					$i = $i -match "([0-9A-F]\{2\}[:-])\{5\}([0-9A-F]\{2\})"\
+					$MAC = $Matches[0].Replace("-","")\
+   				\}\
+			\}\
+\
+			#A Record \
+			$error.clear()\
+			try \{\
+				Get-WmiObject -ComputerName $domaincontroller -Namespace 'root\\MicrosoftDNS' -Class 'MicrosoftDNS_AType' -Filter "OwnerName = '$FullyQualified'"\
+			\} catch \{\
+				$results += "No A record found."\
+			\}\
+			if (!$error) \{\
+				Get-WmiObject -ComputerName $domaincontroller -Namespace 'root\\MicrosoftDNS' -Class 'MicrosoftDNS_AType' -Filter "OwnerName = '$FullyQualified'" | Remove-WmiObject\
+				$results += "A record deleted."\
+			\}\
+\
+			#Ptr Record\
+			$error.clear()\
+			try \{\
+				Get-WmiObject -ComputerName $domaincontroller -Namespace 'root\\MicrosoftDNS' -Class 'MicrosoftDNS_PTRType' -Filter "PTRDomainName = '$FullyQualified.'"\
+			\} catch \{\
+				$results += "No PTR record found."\
+			\}	\
+			if (!$error) \{\
+				Get-WmiObject -ComputerName $domaincontroller -Namespace 'root\\MicrosoftDNS' -Class 'MicrosoftDNS_PTRType' -Filter "PTRDomainName = '$FullyQualified.'" | Remove-WmiObject\
+				$results += "PTR record deleted."\
+			\}\
+\
+			#DHCP \
+			$error.clear()\
+			try \{\
+				Delete-DHCPReservation -Server $dhcpserver -Scope $Scope -IPAddress $IP >$null\
+			\} catch \{\
+				$results += "No DHCP record found for $Name."\
+			\}	\
+			if (!$error) \{\
+				$results += "DHCP record for $Name deleted."\
+			\}\
+			\
+			#Active Directory\
+			$Computer = ([adsi]([adsisearcher]"samaccountname=$Name`$").findone().path)\
+			if ($Computer) \{\
+				if ($v) \{\
+					Write-Host "Details about Active Directory Object:"\
+					$Computer.psbase.deletetree()\
+				\} else \{\
+					$Computer.psbase.deletetree() >$null\
+				\}\
+				$results += "Active Directory object for $Name deleted."\
+			\} else \{\
+				$results += "No Active Directory object found for $Name."\
+			\}\
+\
+			#Allow Filter\
+			$error.clear()\
+			try \{\
+				Delete-DHCPFilter -Server $dhcpserver -MACAddress $MAC >$null\
+			\} catch \{\
+				$results += "No DHCP Allow Filter entry found for $Name."\
+			\}	\
+			if (!$error) \{\
+				$results += "DHCP Allow Filter for $Name deleted."\
+			\}\
+\
+			createAllowList\
+			$results += "ALLOWED.txt entry deleted.`n"\
+\
+\
+			Write-Host "####################################################`nResults:"\
+			$results\
+		\}\
+	\
+        	1 \{"Cancelled."\}\
+    	\}\
+\}\
+\
+function addClientLaptop \{\
+	param(\
+	[Parameter(Mandatory=$true)][string]$HostName,\
+	[Parameter(Mandatory=$true)][ValidatePattern("([0-9a-fA-F]\{2\}[:-]\{0,1\})\{5\}[0-9a-fA-F]\{2\}")][string]$MACAddress\
+	)\
+\
+	$temp = $HostName.split(".")\
+	$Name = $temp[0]\
+	$found = $True\
+	$inst = "Not found"\
+	\
+	$tempinst = getOnlineHosts -Computers "inst1","inst2","inst3","inst4"\
+	$tempinst += " "\
+	Write-Host "inst hosts currently being used:"\
+	$tempinst\
+	if (!($tempinst -contains "inst1")) \{\
+		$inst = "inst1.fully.qualified.domain\'94\
+		$IP = "192.168.1.1\'94\
+	\} elseif (!($tempinst -contains "inst2")) \{\
+		$inst = "inst2.fully.qualified.domain\'94\
+		$IP = "192.168.1.2\'94\
+	\} elseif (!($tempinst -contains "inst3")) \{\
+		$inst = "inst3.fully.qualified.domain\'94\
+		$IP = "192.168.1.3\'94\
+	\} elseif (!($tempinst -contains "inst4")) \{\
+		$inst = "inst4.fully.qualified.domain\'93\
+		$IP = "192.168.1.4\'94\
+	\}\
+\
+	if ($inst -eq "Not found") \{\
+		Write-Host "No inst available"\
+		return\
+	\}\
+\
+	$temp = $inst.split(".")\
+	$instFirst = $temp[0]\
+	$octects = $IP.split(".")\
+	$rzone = "\{0\}.\{1\}.\{2\}.in-addr.arpa" -f $octects[2],$octects[1],$octects[0]\
+	$Zone = "\{0\}.\{1\}.\{2\}.0" -f $octects[0],$octects[1],$octects[2]\
+\
+	$date = Get-Date	\
+	$date = $date.AddDays(7)\
+	$date = $date.ToShortDateString()		\
+\
+	Add-DHCPFilter -Server $dhcpserver -Allow -MACAddress $MACAddress -Description '00_$($Name)_Delete_After_$($date)'\
+	Delete-DHCPReservation -Server $dhcpserver -Scope $Zone -IPAddress $IP -Name $inst\
+	$inst\
+	New-DHCPReservation -Server $dhcpserver -Scope $Zone -IPAddress $IP -MACAddress $MACAddress -Description $inst -Name $instFirst \
+	Write-Host "Created DHCP Reservation and Allow Filter"\
+	createComputerObject $Name -laptop\
+	Write-Host "Created Computer Object"\
+	createAllowList\
+	Write-Host "Allow List on pxebootserver updated"\
+\}\
+\
+<#THIS IS AN AUXILLARY FUNCTION#>\
+function Get-DnsEntry \{ \
+	param([Parameter(Mandatory=$True)][string]$iphost)	\
+	if ($iphost -match "^\\d\{1,3\}\\.\\d\{1,3\}\\.\\d\{1,3\}\\.\\d\{1,3\}$") \{\
+		$temp = [System.Net.Dns]::GetHostByAddress("$iphost").HostName\
+		return $temp\
+	\}elseif ($iphost -match "\\w+")\{\
+		return [System.Net.Dns]::GetHostAddresses($computername).IPAddressToString\
+	\}else\{\
+		Write-Host "Specify either an IP V4 address or a hostname"\
+	\}\
+\}\
+\
+<#THIS IS AN AUXILLARY FUNCTION#>\
+function New-DNSRecord \{\
+	param(\
+	[string]$server, #Server FQDN \
+	[string]$fzone, #Forward Zone ex. fully.qualified.domain\
+	[string]$rzone, #Reverse Zone ex. 1.168.192.in-addr.arpa\
+	[string]$computer, #Computer FQDN ex. testhost.fully.qualified.domain\
+	[string]$address, #IPaddress ex. 192.168.1.1\
+	[switch]$arec, #Create A Record\
+	[switch]$ptr #Create a PTR Record\
+	)\
+	\
+	if (-not(Test-Connection -ComputerName $server))\{Throw "DNS server not found"\}\
+	$srvr = $server -split "\\."\
+	$addr = $address -split "\\."\
+	$rec = [WmiClass]"\\\\$($srvr[0])\\root\\MicrosoftDNS:MicrosoftDNS_ResourceRecord"\
+	\
+	if ($arec)\{\
+		$text = "$computer IN A $address"\
+		$temp = $rec.CreateInstanceFromTextRepresentation($server,$fzone,$text)\
+		Write-Host "A Record created for $computer"\
+	\}\
+	\
+	if ($ptr)\{\
+		$text = "$($addr[3]).$rzone IN PTR $computer"\
+		$temp = $rec.CreateInstanceFromTextRepresentation($server,$rzone,$text)\
+		Write-Host "PTR Reccord created for $computer"\
+	\}\
+	\
+	Write-Host "DNS Records created"\
+\}\
+\
+<#THIS IS AN AUXILLARY FUNCTION#>\
+function New-DHCPReservation \{ \
+  Param([Parameter(Mandatory=$false)][string]$Server, \
+        [Parameter(Mandatory=$true,ValueFromPipeline=$true)][string]$Scope, \
+        [Parameter(Mandatory=$true)][ValidatePattern("\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.)\{3\}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b")][string]$IPAddress, \
+        [Parameter(Mandatory=$true)][ValidatePattern("([0-9a-fA-F]\{2\}[:-]\{0,1\})\{5\}[0-9a-fA-F]\{2\}")][string]$MACAddress, \
+        [Parameter(Mandatory=$false)][string]$Name, \
+        [Parameter(Mandatory=$false)][string]$Description \
+        ) \
+  $MACAddress = $MACAddress.Replace("-","").Replace(":","") \
+  $text = $(Invoke-Expression "cmd /c netsh dhcp server \\\\$Server scope $Scope add reservedip $IPAddress $MACAddress `"$Name.fully.qualified.domain`\'94 `"$Description`"") \
+  $result = if($text.GetType() -eq [string])\{$text\} else\{$text[($text.Count-1)]\}\
+  if($result.Contains("completed successfully")) \{ \
+  	Write-Host "DHCP Reservation Added" \
+  	return \
+  \}\
+  elseif($result.Contains("Server may not function properly")) \{ Write-Host "ERROR: $Server is inaccessible or is not a DHCP server." -ForeGroundColor Red \} \
+  elseif($result.Contains("The command needs a valid Scope IP Address")) \{ Write-Host "ERROR: $Scope is not a valid scope on $Server." -ForeGroundColor Red \} \
+  else \{ Write-Host "ERROR: $result" -ForeGroundColor Red \} \
+\}	\
+\
+<#THIS IS AN AUXILLARY FUNCTION#>\
+function Delete-DHCPReservation \{ \
+  Param([Parameter(Mandatory=$false)][string]$Server, \
+        [Parameter(Mandatory=$true,ValueFromPipeline=$true)][string]$Scope, \
+        [Parameter(Mandatory=$true)][ValidatePattern("\\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.)\{3\}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\b")][string]$IPAddress, \
+        [Parameter(Mandatory=$false)][string]$Name)\
+  <#$MACAddress = $MACAddress.Replace("-","").Replace(":","") #>\
+  $text = $(Invoke-Expression "cmd /c netsh dhcp server \\\\$Server scope $Scope delete reservedip $IPAddress test ") \
+  $result = if($text.GetType() -eq [string])\{$text\} else\{$text[($text.Count-1)]\}\
+  if($result.Contains("completed successfully")) \{ \
+  	Write-Host "DHCP Reservation Deleted" \
+  	return \
+  \}\
+  elseif($result.Contains("Server may not function properly")) \{ Write-Host "ERROR: $Server is inaccessible or is not a DHCP server." -ForeGroundColor Red \} \
+  elseif($result.Contains("The command needs a valid Scope IP Address")) \{ Write-Host "ERROR: $Scope is not a valid scope on $Server." -ForeGroundColor Red \} \
+  else \{ Write-Host "ERROR: $result" -ForeGroundColor Red \} \
+\}	\
+  \
+<#THIS IS AN AUXILLARY FUNCTION#>\
+function Add-DHCPFilter \{ \
+	Param([Parameter(Mandatory=$true)][string]$Server, \
+		[Parameter(Mandatory=$true,ParameterSetName="Allow")][switch]$Allow, \
+        [Parameter(Mandatory=$true,ParameterSetName="Deny")][switch]$Deny, \
+        [Parameter(Mandatory=$true)][ValidatePattern("([0-9a-fA-F]\{2\}[:-]\{0,1\})\{5\}[0-9a-fA-F]\{2\}")][string]$MACAddress, \
+        [Parameter(Mandatory=$true)][string]$Description) \
+  $MACAddress = $MACAddress.Replace("-","").Replace(":","") \
+  $text = $(Invoke-Expression "cmd /c netsh dhcp server \\\\$Server v4 add filter $(if($Allow)\{"allow"\}else\{"deny"\}) $MACAddress `"$Description`"") \
+  $result = if($text.GetType() -eq [string])\{$text\}else\{$text[($text.Count-1)]\} \
+  if($result.Contains("completed successfully")) \{ \
+    if($text.Count -ge 4 -and $text[3].Contains("not a valid DNS Server")) \{ Write-Host "ERROR: $($text[3])" -ForeGroundColor Red; return \}\
+	Write-Host "DHCP Filter added"\
+	return\
+  \} \
+  elseif($result.Contains("Server may not function properly")) \{ Write-Host "ERROR: $server is inaccessible or is not a DHCP server." -ForeGroundColor Red; return \} \
+  elseif($result.Contains("Address or Address pattern is already")) \{ $temp = "ERROR: There is an existing $($PSCmdlet.ParameterSetName.ToLower()) filter for $MACAddress on $Server."; Write-Host $temp -ForeGroundColor Red; return $temp \} \
+  else \{ Write-Host "ERROR: $result" -ForeGroundColor Red; return \} \
+\}\
+\
+<#THIS IS AN AUXILLARY FUNCTION#>\
+function Delete-DHCPFilter \{ \
+	Param([Parameter(Mandatory=$true)][string]$Server, \
+        [Parameter(Mandatory=$true)][ValidatePattern("([0-9a-fA-F]\{2\}[:-]\{0,1\})\{5\}[0-9a-fA-F]\{2\}")][string]$MACAddress) \
+  $MACAddress = $MACAddress.Replace("-","").Replace(":","") \
+  $text = $(Invoke-Expression "cmd /c netsh dhcp server \\\\$Server v4 delete filter $MACAddress ") \
+  $result = if($text.GetType() -eq [string])\{$text\}else\{$text[($text.Count-1)]\} \
+  if($result.Contains("completed successfully")) \{ \
+    if($text.Count -ge 4 -and $text[3].Contains("not a valid DNS Server")) \{ Write-Host "ERROR: $($text[3])" -ForeGroundColor Red; return \}\
+	Write-Host "DHCP Filter removed\'94\
+	return\
+  \} \
+  elseif($result.Contains("Server may not function properly")) \{ Write-Host "ERROR: $server is inaccessible or is not a DHCP server." -ForeGroundColor Red; return \} \
+  elseif($result.Contains("Address or Address pattern is already")) \{ $temp = "ERROR: There is an existing $($PSCmdlet.ParameterSetName.ToLower()) filter for $MACAddress on $Server."; Write-Host $temp -ForeGroundColor Red; return $temp \} \
+  else \{ Write-Host "ERROR: $result" -ForeGroundColor Red; return \} \
+\}\
+\
+<#\
+.SYNOPSIS\
+Recreates the list of allowed MAC Addresses on pxebootserver.\
+\
+.DESCRIPTION\
+Using this function should only be required to install a Windows host if \
+the addClient command was not used. The host's MAC Address must be \
+in the ALLOWED.txt file on pxebootserver to install correctly. \
+\
+.EXAMPLE\
+PS C:\\> createAllowList\
+Recreates the ALLOWED.txt file on pxebootserver.\
+#>\
+function createAllowList\{\
+	$(Invoke-Expression "cmd /c netsh dhcp server \\\\$dhcpserver dump > \\\\ pxebootserver\\c$\\dump.TXT")\
+	$temp = Get-Content \\\\ pxebootserver\\c$\\dump.TXT\
+	$regex = 'Dhcp Server \\\\\\\\' + $dhcpserver + ' v4 Add Filter Allow (([0-9A-F]\{2\}[:-])\{5\}([0-9A-F]\{2\})) \\".*\\"'\
+	$regex\
+	$loc =  "\\\\ pxebootserver\\c$\\ALLOWED.TXT" \
+	$temp = $temp -match $regex\
+	$temp = $temp -replace $regex,'$1'\
+	$temp -replace "-",'' | Out-File $loc -Encoding ascii\
+	Remove-Item \\\\ pxebootserver\\c$\\dump.TXT\
+\}	\
+\
+<#\
+.SYNOPSIS\
+List all windows clients listed under Active Directory.\
+\
+.DESCRIPTION\
+Can filter windows clients according to OS (Win7 or WinXP).\
+Default beahvior is to return AD objects. But also can \
+return the names and total number of hosts.\
+\
+Parameter: Names\
+When invoked returns the hostnames of the requested clients.\
+\
+Parameter: Count\
+When invoked returns the number of hosts.\
+\
+Parameter: OS\
+Pass in "win7", "winXP", "win80\'94, \'93win81\'94, or \'93win8\'94 (for all variations of Windows 8) to filter hosts requested.\
+\
+.EXAMPLE\
+C:\\PS> listClients -Names -Count\
+Returns the hostnames and total number of all clients.\
+\
+.EXAMPLE\
+PS C:\\> listClients -Names -OS "win7"\
+Returns the hostnames of all Windows 7 clients\
+\
+.EXAMPLE\
+PS C:\\> listClients -OS "winXP"\
+Returns the AD objects of all Windows XP hosts.\
+#>\
+function listClients \{\
+   param([switch]$Names,[switch]$Count,[ValidateSet("winXP","win7","win8\'94,\'94win80\'94,\'94win81\'94)][string]$OS)\
+   \
+   $clientNames = @()\
+   $clientCount = 0\
+	\
+   if ($OS -eq "win8") \{\
+   	$filterOS = \{OperatingSystem -Like "Windows 8*"\}\
+   \} elseif ($OS -eq "win80\'94) \{\
+   	$filterOS = \{OperatingSystem -Like 'Windows 8 *'\} \
+   \} elseif ($OS -eq "win81\'94) \{\
+   	$filterOS = \{OperatingSystem -Like 'Windows 8.1*'\}\
+   \} elseif ($OS -eq "win7") \{\
+   	$filterOS = \{OperatingSystem -Like "Windows 7*\'94\}\
+   \} elseif ($OS -eq "winxp") \{\
+   	$filterOS = \{OperatingSystem -Like "Windows XP*"\}\
+   \} else \{\
+   	$filterOS = \{OperatingSystem -Like "Windows*"\}\
+   \}\
+\
+   $compList = Get-ADComputer -SearchScope Subtree -Filter "$filterOS" -SearchBase \'93\'94 #Removed for privacy reasons\
+   $compList += Get-ADComputer -SearchScope Subtree -Filter "$filterOS" -SearchBase \'93\'94 #Removed for privacy reasons\
+   $compList += Get-ADComputer -SearchScope Subtree -Filter "$filterOS" -SearchBase "" #Removed for privacy reasons\
+   $compList += Get-ADComputer -SearchScope Subtree -Filter "$filterOS" -SearchBase "" #Removed for privacy reasons\
+   \
+   $compList = $compList | Sort-Object -Property Name\
+   \
+   foreach ($comp in $compList) \{\
+      $clientNames += $comp.Name\
+   \}\
+   $clientCount = $compList.length\
+   if ($Names -eq $True -and $Count -eq $True) \{\
+	$clientNames\
+	$clientCount\
+	return\
+   \}\
+   if ($Count -eq $True) \{\
+	$clientCount\
+	return\
+   \}\
+   if ($Names -eq $True) \{ \
+	$clientNames\
+	return\
+   \}\
+   if ($OS -eq "win7" -and $Count -eq $True) \{ \
+	$clientCount\
+	return\
+   \}\
+   return $compList\
+\}\
+\
+<#THIS IS AN AUXILLARY FUNCTION#>\
+function createComputerObject \{\
+	param([Parameter(Mandatory=$true)][string]$Name,\
+	[switch]$laptop)\
+	$OU = Get-ADOrganizationalUnit -Filter \{objectclass -eq "organizationalUnit"\} -Properties distinguishedname\
+	$OU = $OU | sort\
+	Write-Host "Please Select an OU:"\
+	if ($laptop -eq $true) \{\
+		for ($x=0; $x -le $OU.length-1; $x++) \{\
+			if ($OU[$x] -match "Laptop") \{\
+				Write-Host "[$x]:" $OU[$x]\
+			\}\
+			if ($OU[$x].DistinguishedName -eq "OU=Test1,OU=Test2,DC=fully,DC=qualified,DC=domain") \{\
+				$laptops2OU = $OU[$x]\
+			\}\
+		\}	\
+		$inputOU = Read-Host "Select OU"\
+		if ($OU[$inputOU].DistinguishedName -eq "OU=temporary,OU=laptop,DC=fully,DC=qualified,DC=domain") \{\
+			Write-Host "Placing the computer object into the temporarylaptop OU. Please move it to the right OU after installation."\
+			$inputOU = $laptops2OU\
+		\} else \{\
+			$inputOU = $OU[$inputOU]\
+		\}\
+	\} else \{\
+		for ($x=0; $x -le $OU.length-1; $x++) \{\
+			Write-Host "[$x]:" $OU[$x]\
+		\}\
+		$inputOU = Read-Host "Select OU"\
+		$inputOU = $OU[$inputOU]\
+	\}\
+	New-ADcomputer \'96name $Name -DNSHostName "$Name.fully.qualified.domain" -path $inputOU\
+	Write-Host "Computer Object created"\
+\}}
